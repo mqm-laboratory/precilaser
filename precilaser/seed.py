@@ -1,8 +1,11 @@
+import logging
 from typing import Optional, Tuple
 
 from .device import AbstractPrecilaserDevice
 from .enums import PrecilaserCommand, PrecilaserDeviceType
 from .status import SeedStatus
+
+logger = logging.getLogger(__name__)
 
 
 class Seed(AbstractPrecilaserDevice):
@@ -45,6 +48,11 @@ class Seed(AbstractPrecilaserDevice):
         message = self._generate_message(PrecilaserCommand.SEED_STATUS)
         self._write(message)
         message = self._read()
+
+        if message is None:
+            logger.warning("No response from device when getting status")
+            return
+
         if message.payload is not None:
             return SeedStatus(message.payload, self.endian)
         else:
@@ -59,6 +67,11 @@ class Seed(AbstractPrecilaserDevice):
         setpoint = int(temperature * 1_000)
         self._set_value(setpoint, PrecilaserCommand.SEED_SET_TEMP)
         message = self._read()
+
+        if message is None:
+            logger.warning("No response from device when setting temperature setpoint")
+            return
+
         if message.payload is not None:
             self._check_write_return(
                 message.payload[:2], setpoint, "temperature setpoint"
@@ -72,12 +85,22 @@ class Seed(AbstractPrecilaserDevice):
 
     @piezo_voltage.setter
     def piezo_voltage(self, voltage: float):
-        assert (
-            voltage >= 0 and voltage <= 74
-        ), "Piezo voltage cannot exceed 0V-74V range"
+        assert voltage >= 0 and voltage <= 74, (
+            "Piezo voltage cannot exceed 0V-74V range"
+        )
         setpoint = int(voltage * 100)
         self._set_value(setpoint, PrecilaserCommand.SEED_SET_VOLTAGE)
-        message = self._read()
+
+        message = None
+        for _ in range(2):
+            message = self._read()
+            if message is not None:
+                break
+
+        if message is None:
+            logger.warning("No response from device when setting piezo voltage")
+            return
+
         if message.payload is not None:
             self._check_write_return(message.payload[:2], setpoint, "piezo voltage")
         else:
@@ -125,6 +148,13 @@ class Seed(AbstractPrecilaserDevice):
         message = self._generate_message(PrecilaserCommand.SEED_SERIAL_WAV)
         self._write(message)
         message = self._read()
+
+        if message is None:
+            logger.warning(
+                "No response from device when getting serial wavelength params"
+            )
+            return
+
         self.serial = message.payload[16:24]
         parameter_bytes = message.payload[25 : 25 + 64]
         self.wavelength_params = [parameter_bytes[i] for i in range(6)]
@@ -133,9 +163,9 @@ class Seed(AbstractPrecilaserDevice):
     def wavelength(self) -> float:
         status = self.status
         temp_grating_act = status.temperature_act * 1_000
-        assert (
-            self.wavelength_params is not None
-        ), "Wavelength parameters not loaded from device"
+        assert self.wavelength_params is not None, (
+            "Wavelength parameters not loaded from device"
+        )
         parameter = self.wavelength_params
         wavelength = (
             (parameter[0] << 8) | parameter[1]
@@ -150,15 +180,21 @@ class Seed(AbstractPrecilaserDevice):
     @wavelength.setter
     def wavelength(self, wavelength: float):
         status = self.status
-        assert (
-            self.wavelength_params is not None
-        ), "Wavelength parameters not loaded from device"
+        assert self.wavelength_params is not None, (
+            "Wavelength parameters not loaded from device"
+        )
         parameter = self.wavelength_params
-        temp_grating_act = (wavelength * 10_000 - (
-            parameter[2] << 24
-            | parameter[3] << 16
-            | ((parameter[4] << 8) | parameter[5])
-        )) * 10_000 /  ((parameter[0] << 8) | parameter[1]
-        )  
+        temp_grating_act = (
+            (
+                wavelength * 10_000
+                - (
+                    parameter[2] << 24
+                    | parameter[3] << 16
+                    | ((parameter[4] << 8) | parameter[5])
+                )
+            )
+            * 10_000
+            / ((parameter[0] << 8) | parameter[1])
+        )
         temp_set = temp_grating_act / 1_000
         self.temperature_setpoint = temp_set

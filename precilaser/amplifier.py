@@ -1,9 +1,12 @@
+import logging
 from typing import Optional, Tuple
 
 from .device import AbstractPrecilaserDevice
 from .enums import PrecilaserCommand, PrecilaserDeviceType, PrecilaserReturn
 from .message import PrecilaserMessage
 from .status import AmplifierStatus
+
+logger = logging.getLogger(__name__)
 
 # The Precilaser Amplifiers send out periodic messages with the laser status and in the
 # case of the SHG amplifier also the TEC temperatures. This happens roughly every
@@ -95,6 +98,13 @@ class Amplifier(AbstractPrecilaserDevice):
                     continue
                 else:
                     raise error
+
+            if message is None:
+                logger.warning(
+                    "Message is None - not sure if this will break things. This is Cathy and Henry's fault and you might need to debug this (sorry)"
+                )
+                return
+
             if message.command == return_command:
                 return message
 

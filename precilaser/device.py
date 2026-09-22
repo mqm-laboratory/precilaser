@@ -1,4 +1,5 @@
 from abc import ABC
+import logging
 from typing import Callable, Optional, cast
 
 import pyvisa
@@ -11,6 +12,8 @@ from .enums import (
     PrecilaserReturn,
 )
 from .message import PrecilaserMessage, decompose_message
+
+logger = logging.getLogger(__name__)
 
 
 class AbstractPrecilaserDevice(ABC):
@@ -87,7 +90,96 @@ class AbstractPrecilaserDevice(ABC):
         """
         self.instrument.write_raw(bytes(message.command_bytes))  # type: ignore
 
-    def _read_single_message(self) -> PrecilaserMessage:
+    def _read_single_message(self, max_attempts: int = 50):
+        """
+        Robust message reader with resynchronization.
+        Returns None on timeout (no full message available).
+        """
+
+        buffer = bytearray()
+
+        for attempt in range(max_attempts):
+            logger.debug(f"Reading single message, attempt: {attempt}")
+            num_bytes_to_read = 64
+            try:
+                buffer += self.instrument.read_bytes(
+                    num_bytes_to_read, break_on_termchar=True
+                )
+
+            except VisaIOError as err:
+                # Timeout → no more data available right now
+                if err.error_code == -1073807339:  # VI_ERROR_TMO
+                    logger.warning("Timeout error occurred, returning None")
+                    return None
+                if "VI_ERROR_ASRL_OVERRUN" in err.args[0]:
+                    continue
+                raise
+
+            # Try to extract message from buffer
+            while True:
+                header_index = buffer.find(self.header)
+                if header_index == -1:
+                    # No header at all → discard garbage
+                    buffer = bytearray()
+                    break
+
+                # Remove garbage before header
+                if header_index > 0:
+                    del buffer[:header_index]
+
+                # Need at least minimal header length
+                if len(buffer) < 5:
+                    break
+
+                # Validate address byte
+                expected_prefix = (
+                    self.header + b"\x00" + self.address.to_bytes(1, self.endian)
+                )
+
+                logger.debug(f"Expected prefix: {expected_prefix}")
+                if not buffer.startswith(expected_prefix):
+                    # Bad alignment → drop first byte and retry
+                    logger.warning("Bad alignment, dropping first byte and retrying")
+                    del buffer[0]
+                    continue
+
+                # Length byte is at position 4
+                payload_len = buffer[4]
+                full_len = 5 + payload_len + 4  # header + len + payload + crc/etc
+                logger.debug(
+                    f"Payload length: {payload_len}. Full length: {full_len}. Buffer len: {len(buffer)}"
+                )
+
+                if len(buffer) < full_len:
+                    # Incomplete message
+                    logger.warning("Incomplete message, retrying...")
+                    break
+
+                raw_msg = bytes(buffer[:full_len])
+
+                try:
+                    message = decompose_message(
+                        raw_msg,
+                        self.address,
+                        self.header,
+                        self.terminator,
+                        self.endian,
+                    )
+                except Exception:
+                    # Bad frame → drop one byte and resync
+                    logger.warning("Bad frame, dropping one byte and resyncing")
+                    del buffer[0]
+                    continue
+
+                logger.info("Successfully decomposed message")
+                return message
+
+        logger.warning(
+            "Failed to find the requested message within max number of attempts"
+        )
+        return None
+
+    def _read_single_message_og(self) -> PrecilaserMessage:
         """
         Read a single message from the Precilaser device
 
@@ -112,6 +204,9 @@ class AbstractPrecilaserDevice(ABC):
                         )
                         return message
             except VisaIOError as err:
+                VI_ERROR_TMO = -1073807339
+                if err.error_code == VI_ERROR_TMO:  # timeout error
+                    return None
                 if "VI_ERROR_ASRL_OVERRUN" in err.args[0]:
                     continue
                 else:
@@ -125,6 +220,8 @@ class AbstractPrecilaserDevice(ABC):
             PrecilaserMessage: message
         """
         message = self._read_single_message()
+        if message is None:
+            return None
         self._handle_message(message)
         return message
 
